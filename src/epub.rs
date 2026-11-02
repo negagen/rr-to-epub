@@ -85,6 +85,12 @@ impl Book {
         let request = client
             .get(format!("https://www.royalroad.com/fiction/{}", id))
             .header("User-Agent", USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "none")
+            .header("Sec-Fetch-Dest", "document")
+            .header("Upgrade-Insecure-Requests", "1")
             .send()
             .await?
             .error_for_status()?;
@@ -183,6 +189,12 @@ impl Book {
                 .client
                 .get(url)
                 .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-Dest", "document")
+                .header("Upgrade-Insecure-Requests", "1")
                 .send()
                 .await?
                 .error_for_status()?;
@@ -386,14 +398,8 @@ fn title_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
                 .attr("href", "../styles/stylesheet.css")
                 .into(),
             XmlEvent::end_element().into(),
-            XmlEvent::start_element("body").into(),
-            // Write the cover.
-            XmlEvent::start_element("img")
-                .attr("src", "../images/cover.jpeg")
-                .attr("alt", "Cover")
-                .attr("class", "cover")
-                .into(),
             XmlEvent::end_element().into(),
+            XmlEvent::start_element("body").into(),
             XmlEvent::start_element("h1").attr("class", "title").into(),
             XmlEvent::characters(&book.title),
             XmlEvent::end_element().into(),
@@ -522,7 +528,7 @@ fn container_xml(_: &Book, file: &mut impl Write) -> eyre::Result<()> {
         vec![
             XmlEvent::start_element("container")
                 .attr("version", "1.0")
-                .ns("a", "urn:oasis:names:tc:opendocument:xmlns:container")
+                .ns("", "urn:oasis:names:tc:opendocument:xmlns:container")
                 .into(),
             XmlEvent::start_element("rootfiles").into(),
             XmlEvent::start_element("rootfile")
@@ -613,9 +619,9 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             // Write the table of contents.
             XmlEvent::start_element("item")
-                .attr("id", "toc")
+                .attr("id", "ncx")
                 .attr("href", "toc.ncx")
-                .attr("media-type", "application/xhtml+xml")
+                .attr("media-type", "application/x-dtbncx+xml")
                 .into(),
             XmlEvent::end_element().into(),
         ],
@@ -627,8 +633,8 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("item")
-                    .attr("id", &format!("{}", &chapter.id))
-                    .attr("href", &format!("text/{}.xhtml", &chapter.id))
+                    .attr("id", &format!("{}", chapter.id))
+                    .attr("href", &format!("text/{}.xhtml", chapter.id))
                     .attr("media-type", "application/xhtml+xml")
                     .into(),
                 XmlEvent::end_element().into(),
@@ -654,7 +660,7 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("itemref")
-                    .attr("idref", &format!("{}", &chapter.id))
+                    .attr("idref", &format!("{}", chapter.id))
                     .into(),
                 XmlEvent::end_element().into(),
             ],
@@ -713,7 +719,7 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::start_element("navMap").into(),
             XmlEvent::start_element("navPoint")
                 .attr("id", "cover")
-                .attr("playOrder", "0")
+                .attr("playOrder", "1")
                 .into(),
             XmlEvent::start_element("navLabel").into(),
             XmlEvent::start_element("text").into(),
@@ -734,8 +740,8 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("navPoint")
-                    .attr("id", &format!("{}", &chapter.id))
-                    .attr("playOrder", &format!("{}", index + 1))
+                    .attr("id", &format!("{}", chapter.id))
+                    .attr("playOrder", &format!("{}", index + 2))
                     .into(),
                 XmlEvent::start_element("navLabel").into(),
                 XmlEvent::start_element("text").into(),
@@ -743,7 +749,7 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::start_element("content")
-                    .attr("src", &format!("text/{}.xhtml", &chapter.id))
+                    .attr("src", &format!("text/{}.xhtml", chapter.id))
                     .into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
@@ -771,7 +777,7 @@ fn extract_image_name(url: &str) -> eyre::Result<String> {
     Ok(url
         .path_segments()
         .ok_or(eyre::eyre!("Invalid image URL"))?
-        .last()
+        .next_back()
         .ok_or(eyre::eyre!("Invalid image URL"))?
         .to_string())
 }
