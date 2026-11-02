@@ -2,6 +2,12 @@ use crate::{cache::Cache, epub::Book};
 
 pub struct RoyalRoadApi;
 
+impl Default for RoyalRoadApi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RoyalRoadApi {
     pub fn new() -> Self {
         Self
