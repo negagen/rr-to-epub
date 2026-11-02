@@ -633,8 +633,8 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("item")
-                    .attr("id", &format!("{}", &chapter.id))
-                    .attr("href", &format!("text/{}.xhtml", &chapter.id))
+                    .attr("id", &format!("{}", chapter.id))
+                    .attr("href", &format!("text/{}.xhtml", chapter.id))
                     .attr("media-type", "application/xhtml+xml")
                     .into(),
                 XmlEvent::end_element().into(),
@@ -660,7 +660,7 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("itemref")
-                    .attr("idref", &format!("{}", &chapter.id))
+                    .attr("idref", &format!("{}", chapter.id))
                     .into(),
                 XmlEvent::end_element().into(),
             ],
@@ -740,7 +740,7 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             &mut xml,
             vec![
                 XmlEvent::start_element("navPoint")
-                    .attr("id", &format!("{}", &chapter.id))
+                    .attr("id", &format!("{}", chapter.id))
                     .attr("playOrder", &format!("{}", index + 2))
                     .into(),
                 XmlEvent::start_element("navLabel").into(),
@@ -749,7 +749,7 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::start_element("content")
-                    .attr("src", &format!("text/{}.xhtml", &chapter.id))
+                    .attr("src", &format!("text/{}.xhtml", chapter.id))
                     .into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
@@ -777,7 +777,7 @@ fn extract_image_name(url: &str) -> eyre::Result<String> {
     Ok(url
         .path_segments()
         .ok_or(eyre::eyre!("Invalid image URL"))?
-        .last()
+        .next_back()
         .ok_or(eyre::eyre!("Invalid image URL"))?
         .to_string())
 }
