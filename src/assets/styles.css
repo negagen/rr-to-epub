@@ -11,18 +11,17 @@ div {
 	line-height: 1.5;
 }
 table {
-	background: #004b7a;
+	background: transparent !important;
 	border-collapse: collapse;
 	border: none;
 	border-spacing: 2px;
-	box-shadow: 1px 1px 1px rgba(0, 0, 0, 0.75);
 	margin: 10px auto;
 	overflow: inherit;
 }
 td {
-	background: rgba(0, 0, 0, 0.1);
-	border: 1px solid hsla(0, 0%, 100%, 0.25) !important;
-	color: #ccc;
+	background: transparent !important;
+	border: 1px solid #bbb !important;
+	color: inherit !important;
 	margin: 3px;
 	padding: 5px;
 }
