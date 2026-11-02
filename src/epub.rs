@@ -343,12 +343,15 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
         }
     }
 
-    // Write the cover.
+    // Write the cover, preferring bytes that were already fetched.
     epub_file.start_file(
         "OEBPS/images/cover.jpeg",
         zip::write::FileOptions::default(),
     )?;
-    download_image(book, book.cover_url.clone(), &mut epub_file).await?;
+    match &book.cover {
+        Some(cover) => epub_file.write_all(cover)?,
+        None => download_image(book, book.cover_url.clone(), &mut epub_file).await?,
+    }
 
     // Write the title page.
     epub_file.start_file("OEBPS/text/title.xhtml", zip::write::FileOptions::default())?;

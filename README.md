@@ -33,6 +33,37 @@ rr-to-epub update -d <directory>
 
 Full help can be found by running `rr-to-epub --help`.
 
+## Testing
+
+The EPUB writer has an integration test that builds a synthetic book fixture and
+writes it to a temporary directory. It uses the cover bytes carried on the book
+and a pre-seeded inline-image cache, so it needs no network:
+
+```sh
+cargo test --test fixture_epub
+```
+
+The fixture intentionally keeps the raw source cases that cleanup will remove
+later: a source notice, a spacer paragraph, unused classes, an inline style, a
+prose link, an announcement chapter, and an author note with a promo image and
+link. For that reason the developer-only fast scorer currently reports a
+failing score; the scorer run is still expected to succeed and write its report.
+
+To generate the same fixture EPUB and matching source cache for the Python fast
+scorer, run this from the `rr-to-epub` checkout:
+
+```powershell
+cargo run --example write_fixture -- qa\fixture
+..\royal-road-epub\scripts\score-epub.ps1 --fast `
+  --source-cache qa\fixture\book.json `
+  --out qa\fixture\score `
+  qa\fixture\fixture.epub
+```
+
+The scorer command is developer-only QA. `cargo test` does not require Python,
+network access, or a paid Jev key. Later cleanup tests can assert structural
+facts from `qa\fixture\score\score.json` and the report's `facts` directory.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

@@ -1,13 +1,7 @@
-use crate::api::RoyalRoadApi;
-use crate::epub::write_epub;
 use clap::Parser;
-use epub::Book;
+use rr_to_epub::api::RoyalRoadApi;
+use rr_to_epub::epub::{write_epub, Book};
 use url::Url;
-
-mod api;
-mod cache;
-mod epub;
-mod xml_ext;
 
 #[derive(Debug, Parser)]
 pub struct DownloadArgs {
