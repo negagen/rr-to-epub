@@ -362,7 +362,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-const STRUCTURAL_CLASSES: [&str; 4] = [
+pub const STRUCTURAL_CLASSES: [&str; 4] = [
     "chapter-title",
     "chapter-content",
     "authors-note-start",
@@ -453,6 +453,23 @@ fn clean_fragment(body: &str, kind: FragmentKind) -> eyre::Result<String> {
     Ok(serialize_fragment(&document))
 }
 
+fn keyword_present(text: &str, keyword: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(keyword) {
+        let position = start + offset;
+        let before = text[..position].chars().next_back();
+        let after = text[position + keyword.len()..].chars().next();
+        let is_boundary = |character: Option<char>| {
+            character.is_none_or(|character| !character.is_alphanumeric())
+        };
+        if is_boundary(before) && is_boundary(after) {
+            return true;
+        }
+        start = position + keyword.len();
+    }
+    false
+}
+
 fn is_source_notice(text: &str) -> bool {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let length = normalized.chars().count();
@@ -463,7 +480,7 @@ fn is_source_notice(text: &str) -> bool {
     let lowercase = normalized.to_lowercase();
     let matches = NOTICE_KEYWORDS
         .iter()
-        .filter(|keyword| lowercase.contains(**keyword))
+        .filter(|keyword| keyword_present(&lowercase, keyword))
         .count();
     matches >= 2
 }
@@ -616,24 +633,13 @@ fn is_void_element(name: &str) -> bool {
     )
 }
 
-fn escape_text(output: &mut String, text: &str) {
-    for character in text.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            _ => output.push(character),
-        }
-    }
-}
-
-fn escape_attribute(output: &mut String, value: &str) {
+fn escape_xml(output: &mut String, value: &str, attribute: bool) {
     for character in value.chars() {
         match character {
             '&' => output.push_str("&amp;"),
             '<' => output.push_str("&lt;"),
             '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
+            '"' if attribute => output.push_str("&quot;"),
             _ => output.push(character),
         }
     }
@@ -674,7 +680,7 @@ fn serialize_fragment(document: &Html) -> String {
                     output.push(' ');
                     output.push_str(name.local.as_ref());
                     output.push_str("=\"");
-                    escape_attribute(&mut output, value);
+                    escape_xml(&mut output, value, true);
                     output.push('"');
                 }
 
@@ -689,7 +695,7 @@ fn serialize_fragment(document: &Html) -> String {
                     }
                 }
             }
-            scraper::Node::Text(text) => escape_text(&mut output, text),
+            scraper::Node::Text(text) => escape_xml(&mut output, text, false),
             _ => {}
         }
     }
@@ -743,11 +749,11 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
             tracing::warn!("Skipping inline image that could not be loaded: {}", url);
             continue;
         };
-        let Some(media_type) = image_media_type(&bytes) else {
+        let Some((media_type, extension)) = image_type(&bytes) else {
             tracing::warn!("Skipping inline image with an unknown media type: {}", url);
             continue;
         };
-        let filename = unique_image_filename(&url, media_type, &mut used_filenames)?;
+        let filename = unique_image_filename(&url, extension, &mut used_filenames)?;
         let manifest_id = unique_image_manifest_id(&filename, &mut used_ids);
         image_names.insert(url, filename.clone());
         images.push(ImageResource {
@@ -757,6 +763,8 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
             bytes,
         });
     }
+
+    let (cover_filename, cover_media_type) = cover_resource(book);
 
     // Open the file.
     let epub_path = temp_folder
@@ -783,7 +791,13 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
 
     // Write the content.opf file, including every retained image.
     epub_file.start_file("OEBPS/content.opf", zip::write::FileOptions::default())?;
-    content_opf(book, &images, &mut epub_file)?;
+    content_opf(
+        book,
+        &images,
+        &cover_filename,
+        cover_media_type,
+        &mut epub_file,
+    )?;
 
     // Write the table of contents (toc.ncx) file.
     epub_file.start_file("OEBPS/toc.ncx", zip::write::FileOptions::default())?;
@@ -815,7 +829,7 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
 
     // Write the cover, preferring bytes that were already fetched.
     epub_file.start_file(
-        "OEBPS/images/cover.jpeg",
+        format!("OEBPS/images/{cover_filename}"),
         zip::write::FileOptions::default(),
     )?;
     match &book.cover {
@@ -888,10 +902,10 @@ fn title_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("body").into(),
-            XmlEvent::start_element("h1").attr("class", "title").into(),
+            XmlEvent::start_element("h1").into(),
             XmlEvent::characters(&book.title),
             XmlEvent::end_element().into(),
-            XmlEvent::start_element("h2").attr("class", "author").into(),
+            XmlEvent::start_element("h2").into(),
             XmlEvent::characters(&book.author),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
@@ -1025,7 +1039,13 @@ fn container_xml(_: &Book, file: &mut impl Write) -> eyre::Result<()> {
     Ok(())
 }
 
-fn content_opf(book: &Book, images: &[ImageResource], file: &mut impl Write) -> eyre::Result<()> {
+fn content_opf(
+    book: &Book,
+    images: &[ImageResource],
+    cover_filename: &str,
+    cover_media_type: &str,
+    file: &mut impl Write,
+) -> eyre::Result<()> {
     let documents = spine_documents(book);
     let title = book.title.trim();
     let description = plain_text(&book.description);
@@ -1092,8 +1112,8 @@ fn content_opf(book: &Book, images: &[ImageResource], file: &mut impl Write) -> 
             // Write the cover.
             XmlEvent::start_element("item")
                 .attr("id", "cover")
-                .attr("href", "images/cover.jpeg")
-                .attr("media-type", "image/jpeg")
+                .attr("href", &format!("images/{cover_filename}"))
+                .attr("media-type", cover_media_type)
                 .attr("properties", "cover-image")
                 .into(),
             XmlEvent::end_element().into(),
@@ -1360,19 +1380,47 @@ fn parse_images(body: &str) -> eyre::Result<Vec<String>> {
     Ok(sources)
 }
 fn rewrite_images(body: String, image_names: &HashMap<String, String>) -> eyre::Result<String> {
-    let parsed = Html::parse_fragment(&body);
-    let selector = Selector::parse("img").unwrap();
+    let mut document = Html::parse_fragment(&body);
+    let ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter_map(|node| {
+            let element = scraper::ElementRef::wrap(node)?;
+            (element.value().name() == "img").then(|| node.id())
+        })
+        .collect();
 
-    let mut rewritten = body;
-    for element in parsed.select(&selector) {
-        if let Some(src) = element.value().attr("src") {
-            if let Some(filename) = image_names.get(src) {
+    for id in ids {
+        let Some(mut node) = document.tree.get_mut(id) else {
+            continue;
+        };
+        let src = node
+            .value()
+            .as_element()
+            .and_then(|element| element.attr("src"))
+            .map(str::to_string);
+        let Some(src) = src else {
+            node.detach();
+            continue;
+        };
+        match image_names.get(&src) {
+            Some(filename) => {
                 let new_src = format!("../images/{filename}");
-                rewritten = rewritten.replace(src, &new_src);
+                if let scraper::Node::Element(element) = node.value() {
+                    if let Some((_, value)) = element
+                        .attrs
+                        .iter_mut()
+                        .find(|(name, _)| name.local.as_ref() == "src")
+                    {
+                        *value = new_src.as_str().into();
+                    }
+                }
             }
+            None => node.detach(),
         }
     }
-    Ok(rewritten)
+
+    Ok(serialize_fragment(&document))
 }
 
 fn is_png(bytes: &[u8]) -> bool {
@@ -1420,32 +1468,36 @@ fn is_html(bytes: &[u8]) -> bool {
     }
 }
 
-fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+fn image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     if is_png(bytes) {
-        Some("image/png")
+        Some(("image/png", "png"))
     } else if is_jpeg(bytes) {
-        Some("image/jpeg")
+        Some(("image/jpeg", "jpg"))
     } else if is_gif(bytes) {
-        Some("image/gif")
+        Some(("image/gif", "gif"))
     } else if is_svg(bytes) {
-        Some("image/svg+xml")
+        Some(("image/svg+xml", "svg"))
     } else {
         None
     }
 }
 
-fn image_extension(media_type: &str) -> &'static str {
-    match media_type {
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/svg+xml" => "svg",
-        _ => "png",
+fn cover_resource(book: &Book) -> (String, &'static str) {
+    if let Some((media_type, extension)) = book.cover.as_deref().and_then(image_type) {
+        let extension = if extension == "jpg" {
+            "jpeg"
+        } else {
+            extension
+        };
+        (format!("cover.{extension}"), media_type)
+    } else {
+        ("cover.jpeg".to_string(), "image/jpeg")
     }
 }
 
 fn unique_image_filename(
     url: &str,
-    media_type: &str,
+    extension: &str,
     used: &mut HashSet<String>,
 ) -> eyre::Result<String> {
     let original = extract_image_name(url)?;
@@ -1454,7 +1506,6 @@ fn unique_image_filename(
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
         .unwrap_or("image");
-    let extension = image_extension(media_type);
 
     let mut candidate = format!("{stem}.{extension}");
     let mut suffix = 2;
@@ -1532,10 +1583,8 @@ async fn load_image(book: &Book, url: &str) -> eyre::Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     if is_gif(&bytes) || is_svg(&bytes) {
-        // Directly pass through the image.
-        let buffer = bytes.to_vec();
-        Cache::write_inline_image(book, &filename, &buffer)?;
-        return Ok(Some(buffer));
+        // Directly pass through the image without changing the cache policy.
+        return Ok(Some(bytes.to_vec()));
     }
 
     let image = if is_webp(&bytes) {

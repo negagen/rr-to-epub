@@ -3,7 +3,7 @@ mod fixture;
 use std::collections::HashMap;
 use std::io::Read;
 
-use rr_to_epub::epub::write_epub;
+use rr_to_epub::epub::{write_epub, STRUCTURAL_CLASSES};
 
 fn archive_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> eyre::Result<String> {
     let mut text = String::new();
@@ -205,13 +205,6 @@ async fn generated_fixture_epub_opens_with_expected_chapters_and_titles() -> eyr
 
 #[tokio::test]
 async fn generated_fixture_epub_cleans_chapter_content_and_notes() -> eyre::Result<()> {
-    const STRUCTURAL_CLASSES: [&str; 4] = [
-        "chapter-title",
-        "chapter-content",
-        "authors-note-start",
-        "authors-note-end",
-    ];
-
     let temp = tempfile::tempdir()?;
     let epub_path = temp.path().join("fixture.epub");
 
@@ -227,6 +220,10 @@ async fn generated_fixture_epub_cleans_chapter_content_and_notes() -> eyre::Resu
     assert!(
         !story_raw.contains(fixture::NOTICE_TEXT),
         "the injected source notice is removed from chapter content"
+    );
+    assert!(
+        story_raw.contains(fixture::FALSE_NOTICE_TEXT),
+        "a span with one notice keyword is not removed"
     );
     assert!(
         !story_raw.contains("source-notice"),
@@ -711,6 +708,29 @@ async fn generated_fixture_epub_declares_only_referenced_inline_images() -> eyre
             "manifest item {href} is referenced by an XHTML document"
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_fixture_epub_uses_the_cover_media_type() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let epub_path = temp.path().join("fixture.epub");
+
+    let mut book = fixture::synthetic_book();
+    book.cover = Some(fixture::story_image_bytes());
+
+    let _cache_guard = fixture::seed_inline_image_cache(&book)?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+
+    let file = std::fs::File::open(&epub_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    assert!(archive.by_name("OEBPS/images/cover.png").is_ok());
+    assert!(archive.by_name("OEBPS/images/cover.jpeg").is_err());
+
+    let opf = archive_text(&mut archive, "OEBPS/content.opf")?;
+    assert!(opf.contains(r#"href="images/cover.png""#));
+    assert!(opf.contains(r#"media-type="image/png""#));
 
     Ok(())
 }

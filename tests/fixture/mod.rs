@@ -25,7 +25,7 @@ pub const PROSE_LINK: &str = "https://example.com/story-reference";
 pub const PROMO_LINK: &str = "https://example.com/promo";
 pub const PROMO_IMAGE_URL: &str = "https://example.com/assets/promo.png";
 pub const PROMO_IMAGE_FILENAME: &str = "promo.png";
-pub const STORY_IMAGE_URL: &str = "https://example.com/assets/story-map.png";
+pub const STORY_IMAGE_URL: &str = "https://example.com/assets/story-map.png?v=1";
 pub const STORY_IMAGE_FILENAME: &str = "story-map.png";
 pub const COVER_URL: &str = "https://example.com/assets/cover.jpg";
 
@@ -35,6 +35,8 @@ pub const NOTE_TEXT: &str =
 /// Long enough, and with two notice keywords, to prove the source-notice rule
 /// never runs inside an author-note container.
 pub const NOTE_NOTICE_TEXT: &str = "This author note was copied from my private notebook with the author's permission, and the chapter it mentions will continue next week as planned.";
+/// Contains one notice keyword only; the notice rule must leave it alone.
+pub const FALSE_NOTICE_TEXT: &str = "This copied passage is a short example of prose that should remain in the story even though it mentions one notice-like word.";
 
 pub fn expected_chapter_titles() -> [&'static str; 3] {
     [CHAPTER_ONE_TITLE, ANNOUNCEMENT_TITLE, CHAPTER_TWO_TITLE]
@@ -62,6 +64,7 @@ fn story_chapter() -> Chapter {
         url: "/fiction/2000000002/chapter/101/chapter-1-the-beginning".to_string(),
         content: Some(format!(
             "<p><span class=\"source-notice\">{NOTICE_TEXT}</span></p>\n\
+                 <p><span class=\"copied-only\">{FALSE_NOTICE_TEXT}</span></p>\n\
                  <p class=\"unused-spacer\">\u{00a0}</p>\n\
                  <p style=\"background-color: #f5f5f5;\">The first paragraph has \
                  <a href=\"{PROSE_LINK}\">a prose link</a> that must survive cleanup.</p>\n\
