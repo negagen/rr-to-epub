@@ -272,6 +272,321 @@ pub struct Chapter {
     pub authors_note_end: Option<String>,
 }
 
+const STRUCTURAL_CLASSES: [&str; 4] = [
+    "chapter-title",
+    "chapter-content",
+    "authors-note-start",
+    "authors-note-end",
+];
+
+const NOTICE_KEYWORDS: [&str; 15] = [
+    "author",
+    "chapter",
+    "source",
+    "copy",
+    "copied",
+    "consent",
+    "permission",
+    "royalroad",
+    "royal road",
+    "support",
+    "official",
+    "publish",
+    "reproduce",
+    "readers",
+    "work",
+];
+
+/// Chapter content cleaned once and reused for both XHTML output and image discovery.
+struct CleanedChapter {
+    content: Option<String>,
+    authors_note_start: Option<String>,
+    authors_note_end: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FragmentKind {
+    ChapterContent,
+    AuthorsNote,
+}
+
+fn clean_chapter(chapter: &Chapter) -> eyre::Result<CleanedChapter> {
+    Ok(CleanedChapter {
+        content: chapter
+            .content
+            .as_deref()
+            .map(|content| clean_fragment(content, FragmentKind::ChapterContent))
+            .transpose()?,
+        authors_note_start: chapter
+            .authors_note_start
+            .as_deref()
+            .map(|note| clean_fragment(note, FragmentKind::AuthorsNote))
+            .transpose()?,
+        authors_note_end: chapter
+            .authors_note_end
+            .as_deref()
+            .map(|note| clean_fragment(note, FragmentKind::AuthorsNote))
+            .transpose()?,
+    })
+}
+
+fn clean_fragment(body: &str, kind: FragmentKind) -> eyre::Result<String> {
+    let mut document = Html::parse_fragment(body);
+
+    match kind {
+        FragmentKind::ChapterContent => remove_source_notices(&mut document),
+        FragmentKind::AuthorsNote => remove_author_note_promos(&mut document),
+    }
+    remove_empty_paragraphs(&mut document);
+    clean_attributes(&mut document);
+
+    Ok(serialize_fragment(&document))
+}
+
+fn is_source_notice(text: &str) -> bool {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let length = normalized.chars().count();
+    if !(80..=260).contains(&length) {
+        return false;
+    }
+
+    let lowercase = normalized.to_lowercase();
+    let matches = NOTICE_KEYWORDS
+        .iter()
+        .filter(|keyword| lowercase.contains(**keyword))
+        .count();
+    matches >= 2
+}
+
+fn remove_source_notices(document: &mut Html) {
+    let ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter_map(|node| {
+            let element = scraper::ElementRef::wrap(node)?;
+            if element.value().name() == "span" {
+                let text = element.text().collect::<String>();
+                is_source_notice(&text).then(|| node.id())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for id in ids {
+        if let Some(mut node) = document.tree.get_mut(id) {
+            node.detach();
+        }
+    }
+}
+
+fn remove_author_note_promos(document: &mut Html) {
+    let image_ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter_map(|node| {
+            let element = scraper::ElementRef::wrap(node)?;
+            (element.value().name() == "img").then(|| node.id())
+        })
+        .collect();
+    for id in image_ids {
+        if let Some(mut node) = document.tree.get_mut(id) {
+            node.detach();
+        }
+    }
+
+    let anchor_ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter_map(|node| {
+            let element = scraper::ElementRef::wrap(node)?;
+            (element.value().name() == "a").then(|| node.id())
+        })
+        .collect();
+    for id in anchor_ids {
+        if let Some(mut node) = document.tree.get_mut(id) {
+            if let scraper::Node::Element(element) = node.value() {
+                element
+                    .attrs
+                    .retain(|name, _| name.local.as_ref() != "href");
+            }
+        }
+    }
+}
+
+fn remove_empty_paragraphs(document: &mut Html) {
+    let image_selector = Selector::parse("img").unwrap();
+    let ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter_map(|node| {
+            let element = scraper::ElementRef::wrap(node)?;
+            if element.value().name() != "p" {
+                return None;
+            }
+
+            let text = element.text().collect::<String>().replace('\u{00a0}', " ");
+            let has_image = element.select(&image_selector).next().is_some();
+            (text.trim().is_empty() && !has_image).then(|| node.id())
+        })
+        .collect();
+
+    for id in ids {
+        if let Some(mut node) = document.tree.get_mut(id) {
+            node.detach();
+        }
+    }
+}
+
+fn clean_attributes(document: &mut Html) {
+    let ids: Vec<_> = document
+        .tree
+        .nodes()
+        .filter(|node| node.value().is_element())
+        .map(|node| node.id())
+        .collect();
+
+    for id in ids {
+        let Some(mut node) = document.tree.get_mut(id) else {
+            continue;
+        };
+        let scraper::Node::Element(element) = node.value() else {
+            continue;
+        };
+
+        element
+            .attrs
+            .retain(|name, _| name.local.as_ref() != "style");
+
+        let class_value = element
+            .attrs
+            .iter()
+            .find(|(name, _)| name.local.as_ref() == "class")
+            .map(|(_, value)| value.to_string());
+        let Some(class_value) = class_value else {
+            continue;
+        };
+
+        let retained = class_value
+            .split_whitespace()
+            .filter(|class| STRUCTURAL_CLASSES.contains(class))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if retained.is_empty() {
+            element
+                .attrs
+                .retain(|name, _| name.local.as_ref() != "class");
+        } else if let Some((_, value)) = element
+            .attrs
+            .iter_mut()
+            .find(|(name, _)| name.local.as_ref() == "class")
+        {
+            *value = retained.as_str().into();
+        }
+    }
+}
+
+fn is_void_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+fn escape_text(output: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+fn escape_attribute(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+/// Serialize a parsed fragment as XML-safe XHTML, self-closing void elements.
+fn serialize_fragment(document: &Html) -> String {
+    let root = document.tree.root();
+    let mut output = String::new();
+    let mut stack: Vec<_> = root.children().map(|node| (node, false)).collect();
+    stack.reverse();
+
+    while let Some((node, closing)) = stack.pop() {
+        if closing {
+            if let Some(element) = node.value().as_element() {
+                if !is_void_element(element.name()) {
+                    output.push_str("</");
+                    output.push_str(element.name());
+                    output.push('>');
+                }
+            }
+            continue;
+        }
+
+        match node.value() {
+            // The fragment parser wraps body content in html/body elements;
+            // those wrappers are not part of the chapter fragment.
+            scraper::Node::Element(element) if matches!(element.name(), "html" | "body") => {
+                let children: Vec<_> = node.children().collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, false));
+                }
+            }
+            scraper::Node::Element(element) => {
+                output.push('<');
+                output.push_str(element.name());
+                for (name, value) in element.attrs.iter() {
+                    output.push(' ');
+                    output.push_str(name.local.as_ref());
+                    output.push_str("=\"");
+                    escape_attribute(&mut output, value);
+                    output.push('"');
+                }
+
+                if is_void_element(element.name()) {
+                    output.push_str(" />");
+                } else {
+                    output.push('>');
+                    stack.push((node, true));
+                    let children: Vec<_> = node.children().collect();
+                    for child in children.into_iter().rev() {
+                        stack.push((child, false));
+                    }
+                }
+            }
+            scraper::Node::Text(text) => escape_text(&mut output, text),
+            _ => {}
+        }
+    }
+
+    output
+}
+
 pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()> {
     // Create a temp dir.
     let temp_folder = tempfile::tempdir()?;
@@ -316,20 +631,23 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
 
     // Write each chapter.
     for chapter in book.chapters.iter() {
+        // Clean once, then use the cleaned strings for both output and image discovery.
+        let cleaned = clean_chapter(chapter)?;
+
         // Write the chapter file.
         epub_file.start_file(
             format!("OEBPS/text/{}.xhtml", chapter.id),
             zip::write::FileOptions::default(),
         )?;
-        chapter_html(chapter, &mut epub_file)?;
+        chapter_html(chapter, &cleaned, &mut epub_file)?;
 
         // Parse and download each inline image in the content, as well as Author's Notes.
-        let mut images = parse_images(&chapter.content.clone().unwrap_or("".to_string()))?;
+        let mut images = parse_images(cleaned.content.as_deref().unwrap_or(""))?;
         images.extend(parse_images(
-            &chapter.authors_note_start.clone().unwrap_or("".to_string()),
+            cleaned.authors_note_start.as_deref().unwrap_or(""),
         )?);
         images.extend(parse_images(
-            &chapter.authors_note_end.clone().unwrap_or("".to_string()),
+            cleaned.authors_note_end.as_deref().unwrap_or(""),
         )?);
         if !images.is_empty() {
             tracing::info!("Downloading inline images for chapter '{}'.", chapter.title);
@@ -416,7 +734,11 @@ fn title_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
     Ok(())
 }
 
-fn chapter_html(chapter: &Chapter, file: &mut impl Write) -> eyre::Result<()> {
+fn chapter_html(
+    chapter: &Chapter,
+    cleaned: &CleanedChapter,
+    file: &mut impl Write,
+) -> eyre::Result<()> {
     let mut xml = EmitterConfig::new().perform_indent(true);
     xml.perform_escaping = false;
     let mut xml = xml.create_writer(file);
@@ -456,34 +778,20 @@ fn chapter_html(chapter: &Chapter, file: &mut impl Write) -> eyre::Result<()> {
     )?;
 
     // Write the starting author's note, if any.
-    if let Some(authors_note_start) = chapter.authors_note_start.clone() {
+    if let Some(authors_note_start) = cleaned.authors_note_start.as_deref() {
         write_elements(
             &mut xml,
             vec![
                 XmlEvent::start_element("div")
                     .attr("class", "authors-note-start")
                     .into(),
-                XmlEvent::characters(&rewrite_images(authors_note_start)?),
+                XmlEvent::characters(&rewrite_images(authors_note_start.to_string())?),
                 XmlEvent::end_element().into(),
             ],
         )?;
     }
     // Write the content.
-    if let Some(mut content) = chapter.content.clone() {
-        // Remove the font-family: *; from styles.
-        let font_family_regex = Regex::new(r#"font-family:.*?;"#).unwrap();
-        content = font_family_regex.replace_all(&content, "").to_string();
-
-        // Remove font-weight: normal and font-weight: 400 from styles.
-        let font_weight_regex = Regex::new(r#"font-weight:\s?normal"#).unwrap();
-        content = font_weight_regex.replace_all(&content, "").to_string();
-        let font_weight_regex = Regex::new(r#"font-weight:\s?400"#).unwrap();
-        content = font_weight_regex.replace_all(&content, "").to_string();
-
-        // Remove overflow: auto.
-        let overflow_regex = Regex::new(r#"overflow:\s?auto"#).unwrap();
-        content = overflow_regex.replace_all(&content, "").to_string();
-
+    if let Some(content) = cleaned.content.as_deref() {
         write_elements(
             &mut xml,
             vec![
@@ -491,20 +799,20 @@ fn chapter_html(chapter: &Chapter, file: &mut impl Write) -> eyre::Result<()> {
                     .attr("class", "chapter-content")
                     .into(),
                 // Rewrite the images to be pointing to our downloaded ones.
-                XmlEvent::characters(&rewrite_images(content)?),
+                XmlEvent::characters(&rewrite_images(content.to_string())?),
                 XmlEvent::end_element().into(),
             ],
         )?;
     }
     // Write the ending author's note, if any.
-    if let Some(authors_note_end) = chapter.authors_note_end.clone() {
+    if let Some(authors_note_end) = cleaned.authors_note_end.as_deref() {
         write_elements(
             &mut xml,
             vec![
                 XmlEvent::start_element("div")
                     .attr("class", "authors-note-end")
                     .into(),
-                XmlEvent::characters(&rewrite_images(authors_note_end)?),
+                XmlEvent::characters(&rewrite_images(authors_note_end.to_string())?),
                 XmlEvent::end_element().into(),
             ],
         )?;

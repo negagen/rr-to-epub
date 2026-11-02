@@ -30,6 +30,9 @@ pub const COVER_URL: &str = "https://example.com/assets/cover.jpg";
 pub const NOTICE_TEXT: &str = "Copied from Royal Road. This chapter was reproduced without the author's consent. Please support the official release and the original work.";
 pub const NOTE_TEXT: &str =
     "Thanks for reading. The next arc starts next week and I hope you enjoy it.";
+/// Long enough, and with two notice keywords, to prove the source-notice rule
+/// never runs inside an author-note container.
+pub const NOTE_NOTICE_TEXT: &str = "This author note was copied from my private notebook with the author's permission, and the chapter it mentions will continue next week as planned.";
 
 pub fn expected_chapter_titles() -> [&'static str; 3] {
     [CHAPTER_ONE_TITLE, ANNOUNCEMENT_TITLE, CHAPTER_TWO_TITLE]
@@ -95,6 +98,7 @@ fn note_chapter() -> Chapter {
         ),
         authors_note_end: Some(format!(
             "<p>{NOTE_TEXT} <a href=\"{PROMO_LINK}\">Check out my other story</a>.</p>\n\
+             <p><span class=\"source-notice\">{NOTE_NOTICE_TEXT}</span></p>\n\
              <p><img src=\"{PROMO_IMAGE_URL}\" alt=\"Promo cover\" /></p>"
         )),
         ..Chapter::default()
