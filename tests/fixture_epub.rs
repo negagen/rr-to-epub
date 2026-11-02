@@ -203,6 +203,153 @@ async fn generated_fixture_epub_opens_with_expected_chapters_and_titles() -> eyr
 }
 
 #[tokio::test]
+async fn generated_fixture_epub_cleans_chapter_content_and_notes() -> eyre::Result<()> {
+    const STRUCTURAL_CLASSES: [&str; 4] = [
+        "chapter-title",
+        "chapter-content",
+        "authors-note-start",
+        "authors-note-end",
+    ];
+
+    let temp = tempfile::tempdir()?;
+    let epub_path = temp.path().join("fixture.epub");
+
+    let book = fixture::synthetic_book();
+    let _cache_guard = fixture::seed_inline_image_cache(&book)?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+
+    let file = std::fs::File::open(&epub_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+
+    let story_raw = archive_text(&mut archive, "OEBPS/text/101.xhtml")?;
+    assert_well_formed_xml("OEBPS/text/101.xhtml", &story_raw)?;
+    assert!(
+        !story_raw.contains(fixture::NOTICE_TEXT),
+        "the injected source notice is removed from chapter content"
+    );
+    assert!(
+        !story_raw.contains("source-notice"),
+        "the source-notice class is removed"
+    );
+    assert!(
+        story_raw.contains(fixture::PROSE_LINK),
+        "prose links survive cleanup"
+    );
+    assert!(
+        story_raw.contains("a prose link"),
+        "prose link text survives cleanup"
+    );
+    assert!(
+        !story_raw.contains("unused-spacer") && !story_raw.contains("extra-spacing"),
+        "non-structural classes are removed"
+    );
+    assert!(
+        !story_raw.contains("style=") && !story_raw.contains("background-color"),
+        "inline styles are removed"
+    );
+    assert_eq!(
+        story_raw.matches("<html").count(),
+        1,
+        "cleaned content is not wrapped in a nested html element"
+    );
+
+    let story = scraper::Html::parse_document(&story_raw);
+    let paragraph_selector = scraper::Selector::parse("p").expect("valid p selector");
+    let image_selector = scraper::Selector::parse("img").expect("valid img selector");
+    for paragraph in story.select(&paragraph_selector) {
+        let text = paragraph
+            .text()
+            .collect::<String>()
+            .replace('\u{00a0}', " ");
+        assert!(
+            !text.trim().is_empty() || paragraph.select(&image_selector).next().is_some(),
+            "no empty paragraph remains in chapter content"
+        );
+    }
+
+    let class_selector = scraper::Selector::parse("[class]").expect("valid class selector");
+    for element in story.select(&class_selector) {
+        let class = element
+            .value()
+            .attr("class")
+            .expect("class selector matched an element with class");
+        for token in class.split_whitespace() {
+            assert!(
+                STRUCTURAL_CLASSES.contains(&token),
+                "unexpected class {token:?} remains in chapter content"
+            );
+        }
+    }
+    let style_selector = scraper::Selector::parse("[style]").expect("valid style selector");
+    assert_eq!(
+        story.select(&style_selector).count(),
+        0,
+        "no inline style attribute remains in chapter content"
+    );
+
+    let note_raw = archive_text(&mut archive, "OEBPS/text/103.xhtml")?;
+    assert_well_formed_xml("OEBPS/text/103.xhtml", &note_raw)?;
+    assert!(
+        note_raw.contains(fixture::NOTE_TEXT),
+        "author-note text survives cleanup"
+    );
+    assert!(
+        note_raw.contains(fixture::NOTE_NOTICE_TEXT),
+        "the source-notice rule never runs inside an author-note container"
+    );
+    assert!(
+        note_raw.contains("Check out my other story"),
+        "author-note link text survives cleanup"
+    );
+    assert!(
+        !note_raw.contains(fixture::PROMO_LINK),
+        "author-note link targets are removed"
+    );
+    assert!(
+        !note_raw.contains(fixture::PROMO_IMAGE_URL) && !note_raw.contains("promo.png"),
+        "author-note promo images are removed"
+    );
+
+    let note = scraper::Html::parse_document(&note_raw);
+    assert_eq!(
+        note.select(&image_selector).count(),
+        0,
+        "author notes contain no images after cleanup"
+    );
+    let anchor_selector = scraper::Selector::parse("a").expect("valid a selector");
+    for anchor in note.select(&anchor_selector) {
+        assert!(
+            anchor.value().attr("href").is_none(),
+            "author-note link targets are removed"
+        );
+    }
+    assert!(
+        archive.by_name("OEBPS/images/promo.png").is_err(),
+        "promo images are never written to the EPUB"
+    );
+
+    let css = archive_text(&mut archive, "OEBPS/styles/stylesheet.css")?;
+    assert!(
+        css.contains("margin: 0 0 0.55em"),
+        "paragraphs use the compact bottom margin"
+    );
+    assert!(
+        css.contains("line-height: 1.45"),
+        "paragraphs use the compact line height"
+    );
+    assert!(
+        css.contains("p:empty") && css.contains("display: none"),
+        "empty paragraphs are hidden"
+    );
+    assert!(
+        css.contains("max-width: 100%"),
+        "images are capped at the page width"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre::Result<()> {
     const DESCRIPTION_HTML: &str =
         "<p>A <strong>synthetic</strong> book &amp; fixture for the <em>EPUB</em> writer.</p>";

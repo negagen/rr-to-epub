@@ -1,14 +1,17 @@
 img {
-	width: 100%;
+	max-width: 100%;
 	height: auto;
 }
 p {
-	margin-bottom: 1em;
-	margin: 20px 0;
+	margin: 0 0 0.55em;
+	line-height: 1.45;
+}
+p:empty {
+	display: none;
 }
 p,
 div {
-	line-height: 1.5;
+	line-height: 1.45;
 }
 table {
 	background: transparent !important;
