@@ -7,9 +7,10 @@ use image::io::Reader;
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::io::{Cursor, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
@@ -393,6 +394,26 @@ struct CleanedChapter {
     authors_note_end: Option<String>,
 }
 
+/// A cleaned chapter waiting for the package to be written.
+struct PreparedChapter<'a> {
+    chapter: &'a Chapter,
+    cleaned: CleanedChapter,
+}
+
+/// An inline image that is both referenced by a chapter and written to the EPUB.
+struct ImageResource {
+    filename: String,
+    manifest_id: String,
+    media_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+impl ImageResource {
+    fn href(&self) -> String {
+        format!("images/{}", self.filename)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FragmentKind {
     ChapterContent,
@@ -690,6 +711,53 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
         ),
     };
 
+    // Clean every chapter before writing the package. Image discovery uses the
+    // cleaned fragments, so removed promo images are never downloaded.
+    let prepared = book
+        .chapters
+        .iter()
+        .map(|chapter| {
+            Ok(PreparedChapter {
+                chapter,
+                cleaned: clean_chapter(chapter)?,
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+    let mut image_urls = Vec::new();
+    let mut seen_urls = HashSet::new();
+    for prepared_chapter in &prepared {
+        for url in cleaned_image_urls(&prepared_chapter.cleaned)? {
+            if seen_urls.insert(url.clone()) {
+                image_urls.push(url);
+            }
+        }
+    }
+
+    let mut images = Vec::new();
+    let mut image_names = HashMap::new();
+    let mut used_filenames = HashSet::new();
+    let mut used_ids = HashSet::new();
+    for url in image_urls {
+        let Some(bytes) = load_image(book, &url).await? else {
+            tracing::warn!("Skipping inline image that could not be loaded: {}", url);
+            continue;
+        };
+        let Some(media_type) = image_media_type(&bytes) else {
+            tracing::warn!("Skipping inline image with an unknown media type: {}", url);
+            continue;
+        };
+        let filename = unique_image_filename(&url, media_type, &mut used_filenames)?;
+        let manifest_id = unique_image_manifest_id(&filename, &mut used_ids);
+        image_names.insert(url, filename.clone());
+        images.push(ImageResource {
+            filename,
+            manifest_id,
+            media_type,
+            bytes,
+        });
+    }
+
     // Open the file.
     let epub_path = temp_folder
         .path()
@@ -713,44 +781,36 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
     epub_file.start_file("META-INF/container.xml", zip::write::FileOptions::default())?;
     container_xml(book, &mut epub_file)?;
 
-    // Write the content.opf file.
+    // Write the content.opf file, including every retained image.
     epub_file.start_file("OEBPS/content.opf", zip::write::FileOptions::default())?;
-    content_opf(book, &mut epub_file)?;
+    content_opf(book, &images, &mut epub_file)?;
 
     // Write the table of contents (toc.ncx) file.
     epub_file.start_file("OEBPS/toc.ncx", zip::write::FileOptions::default())?;
     toc_ncx(book, &mut epub_file)?;
 
-    // Write each chapter.
-    for chapter in book.chapters.iter() {
-        // Clean once, then use the cleaned strings for both output and image discovery.
-        let cleaned = clean_chapter(chapter)?;
-
-        // Write the chapter file.
+    // Write each chapter with its ImageResource references rewritten to the
+    // retained image files.
+    for prepared_chapter in &prepared {
         epub_file.start_file(
-            format!("OEBPS/text/{}.xhtml", chapter.id),
+            format!("OEBPS/text/{}.xhtml", prepared_chapter.chapter.id),
             zip::write::FileOptions::default(),
         )?;
-        chapter_html(chapter, &cleaned, &mut epub_file)?;
+        chapter_html(
+            prepared_chapter.chapter,
+            &prepared_chapter.cleaned,
+            &image_names,
+            &mut epub_file,
+        )?;
+    }
 
-        // Parse and download each inline image in the content, as well as Author's Notes.
-        let mut images = parse_images(cleaned.content.as_deref().unwrap_or(""))?;
-        images.extend(parse_images(
-            cleaned.authors_note_start.as_deref().unwrap_or(""),
-        )?);
-        images.extend(parse_images(
-            cleaned.authors_note_end.as_deref().unwrap_or(""),
-        )?);
-        if !images.is_empty() {
-            tracing::info!("Downloading inline images for chapter '{}'.", chapter.title);
-            for url in images.iter() {
-                epub_file.start_file(
-                    format!("OEBPS/images/{}", extract_image_name(url)?),
-                    zip::write::FileOptions::default(),
-                )?;
-                download_image(book, url.to_string(), &mut epub_file).await?;
-            }
-        }
+    // Write only the retained images.
+    for image in &images {
+        epub_file.start_file(
+            format!("OEBPS/images/{}", image.filename),
+            zip::write::FileOptions::default(),
+        )?;
+        epub_file.write_all(&image.bytes)?;
     }
 
     // Write the cover, preferring bytes that were already fetched.
@@ -760,7 +820,7 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
     )?;
     match &book.cover {
         Some(cover) => epub_file.write_all(cover)?,
-        None => download_image(book, book.cover_url.clone(), &mut epub_file).await?,
+        None => download_cover(book, &mut epub_file).await?,
     }
 
     // Write the title page.
@@ -785,6 +845,17 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
 
     tracing::info!("Wrote EPUB to {:?}", outfile);
     Ok(())
+}
+
+fn cleaned_image_urls(cleaned: &CleanedChapter) -> eyre::Result<Vec<String>> {
+    let mut images = parse_images(cleaned.content.as_deref().unwrap_or(""))?;
+    images.extend(parse_images(
+        cleaned.authors_note_start.as_deref().unwrap_or(""),
+    )?);
+    images.extend(parse_images(
+        cleaned.authors_note_end.as_deref().unwrap_or(""),
+    )?);
+    Ok(images)
 }
 
 fn stylesheet(file: &mut impl Write) -> eyre::Result<()> {
@@ -833,6 +904,7 @@ fn title_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
 fn chapter_html(
     chapter: &Chapter,
     cleaned: &CleanedChapter,
+    image_names: &HashMap<String, String>,
     file: &mut impl Write,
 ) -> eyre::Result<()> {
     let mut xml = EmitterConfig::new().perform_indent(true);
@@ -881,7 +953,10 @@ fn chapter_html(
                 XmlEvent::start_element("div")
                     .attr("class", "authors-note-start")
                     .into(),
-                XmlEvent::characters(&rewrite_images(authors_note_start.to_string())?),
+                XmlEvent::characters(&rewrite_images(
+                    authors_note_start.to_string(),
+                    image_names,
+                )?),
                 XmlEvent::end_element().into(),
             ],
         )?;
@@ -895,7 +970,7 @@ fn chapter_html(
                     .attr("class", "chapter-content")
                     .into(),
                 // Rewrite the images to be pointing to our downloaded ones.
-                XmlEvent::characters(&rewrite_images(content.to_string())?),
+                XmlEvent::characters(&rewrite_images(content.to_string(), image_names)?),
                 XmlEvent::end_element().into(),
             ],
         )?;
@@ -908,7 +983,7 @@ fn chapter_html(
                 XmlEvent::start_element("div")
                     .attr("class", "authors-note-end")
                     .into(),
-                XmlEvent::characters(&rewrite_images(authors_note_end.to_string())?),
+                XmlEvent::characters(&rewrite_images(authors_note_end.to_string(), image_names)?),
                 XmlEvent::end_element().into(),
             ],
         )?;
@@ -950,7 +1025,7 @@ fn container_xml(_: &Book, file: &mut impl Write) -> eyre::Result<()> {
     Ok(())
 }
 
-fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
+fn content_opf(book: &Book, images: &[ImageResource], file: &mut impl Write) -> eyre::Result<()> {
     let documents = spine_documents(book);
     let title = book.title.trim();
     let description = plain_text(&book.description);
@@ -1046,6 +1121,21 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
         ],
     )?;
+
+    // Declare every retained inline image with a stable ID and real media type.
+    for image in images {
+        write_elements(
+            &mut xml,
+            vec![
+                XmlEvent::start_element("item")
+                    .attr("id", &image.manifest_id)
+                    .attr("href", &image.href())
+                    .attr("media-type", image.media_type)
+                    .into(),
+                XmlEvent::end_element().into(),
+            ],
+        )?;
+    }
 
     // Write the title page and each chapter in reading order.
     for document in &documents {
@@ -1269,17 +1359,20 @@ fn parse_images(body: &str) -> eyre::Result<Vec<String>> {
     }
     Ok(sources)
 }
-fn rewrite_images(mut body: String) -> eyre::Result<String> {
+fn rewrite_images(body: String, image_names: &HashMap<String, String>) -> eyre::Result<String> {
     let parsed = Html::parse_fragment(&body);
     let selector = Selector::parse("img").unwrap();
 
+    let mut rewritten = body;
     for element in parsed.select(&selector) {
         if let Some(src) = element.value().attr("src") {
-            let new_src = format!("../images/{}", extract_image_name(src)?);
-            body = body.replace(src, &new_src);
+            if let Some(filename) = image_names.get(src) {
+                let new_src = format!("../images/{filename}");
+                rewritten = rewritten.replace(src, &new_src);
+            }
         }
     }
-    Ok(body)
+    Ok(rewritten)
 }
 
 fn is_png(bytes: &[u8]) -> bool {
@@ -1327,102 +1420,182 @@ fn is_html(bytes: &[u8]) -> bool {
     }
 }
 
-async fn download_image(book: &Book, url: String, file: &mut impl Write) -> eyre::Result<()> {
-    let filename = extract_image_name(&url)?;
-    match Cache::read_inline_image(book, &filename)? {
-        Some(image) => {
-            file.write_all(&image)?;
-        }
-        None => {
-            let client = reqwest::Client::new();
-            let image = match client
-                .get(&url)
-                .header("User-Agent", USER_AGENT)
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(e) => {
-                    // Handle DNS and connection errors gracefully
-                    tracing::warn!(
-                        "Failed to download image from URL ({}): {}. This is likely NOT a bug with rr-to-epub.",
-                        url,
-                        e
-                    );
-                    return Ok(());
-                }
-            };
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if is_png(bytes) {
+        Some("image/png")
+    } else if is_jpeg(bytes) {
+        Some("image/jpeg")
+    } else if is_gif(bytes) {
+        Some("image/gif")
+    } else if is_svg(bytes) {
+        Some("image/svg+xml")
+    } else {
+        None
+    }
+}
 
-            if !image.status().is_success() {
-                tracing::warn!(
-                    "Failed to download image from URL (HTTP {}): {}. This is likely NOT a bug with rr-to-epub.",
-                    image.status(),
-                    url
-                );
-                return Ok(());
-            }
-            let bytes = image.bytes().await?;
+fn image_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
 
-            let image = if is_html(&bytes) {
-                // Skip HTML pages.
-                return Ok(());
-            } else if is_gif(&bytes) || is_svg(&bytes) {
-                // Directly pass through the image.
-                file.write_all(&bytes)?;
-                return Ok(());
-            } else if is_webp(&bytes) {
-                // Decode the image.
-                let Some(webp) = Decoder::new(&bytes).decode() else {
-                    tracing::warn!(
-                        "Failed to decode webp image. Please report this as a bug and include the following URL: {}",
-                        url
-                    );
-                    return Ok(()); // Skip the image.
-                };
-                webp.to_image()
-            } else if is_jpeg(&bytes) || is_png(&bytes) {
-                // Decode the image.
-                Reader::new(Cursor::new(&bytes))
-                    .with_guessed_format()?
-                    .decode()?
-            } else {
-                bail!("Unsupported inline image format. Please report this as a bug and include the following URL: {}", url);
-            };
+fn unique_image_filename(
+    url: &str,
+    media_type: &str,
+    used: &mut HashSet<String>,
+) -> eyre::Result<String> {
+    let original = extract_image_name(url)?;
+    let stem = Path::new(&original)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("image");
+    let extension = image_extension(media_type);
 
-            // Resize to max width of 600px.
-            let width = image.width();
-            let height = image.height();
-            let image = image.resize(
-                600,
-                600 * height / width,
-                image::imageops::FilterType::Lanczos3,
-            );
+    let mut candidate = format!("{stem}.{extension}");
+    let mut suffix = 2;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{stem}-{suffix}.{extension}");
+        suffix += 1;
+    }
+    Ok(candidate)
+}
 
-            // Encode the image.
-            let mut buffer = Vec::new();
-            if is_png(&bytes) || is_webp(&bytes) {
-                // We write both PNG and WebP as PNG because WebP is not supported by some e-readers.
-                image.write_with_encoder(PngEncoder::new_with_quality(
-                    Cursor::new(&mut buffer),
-                    CompressionType::Fast,
-                    FilterType::Adaptive,
-                ))?;
-            } else if is_jpeg(&bytes) {
-                image.write_with_encoder(JpegEncoder::new_with_quality(
-                    Cursor::new(&mut buffer),
-                    80,
-                ))?;
-            } else {
-                bail!("Unsupported inline image format. Please report this as a bug and include the following URL: {}", url);
-            };
-
-            // Save the image in the cache.
-            Cache::write_inline_image(book, &filename, &buffer)?;
-
-            // Write the image to the file.
-            file.write_all(&buffer)?;
+fn unique_image_manifest_id(filename: &str, used: &mut HashSet<String>) -> String {
+    let mut base = String::from("img-");
+    for character in filename.chars() {
+        if character.is_ascii_alphanumeric() {
+            base.push(character.to_ascii_lowercase());
+        } else if !base.ends_with('-') {
+            base.push('-');
         }
     }
+    while base.ends_with('-') {
+        base.pop();
+    }
+    if base == "img" {
+        base.push_str("-image");
+    }
 
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+/// Load one inline image, preferring the cache so tests and repeat runs never
+/// touch the network.
+async fn load_image(book: &Book, url: &str) -> eyre::Result<Option<Vec<u8>>> {
+    let filename = extract_image_name(url)?;
+    if let Some(image) = Cache::read_inline_image(book, &filename)? {
+        return Ok(Some(image.to_vec()));
+    }
+
+    let client = reqwest::Client::new();
+    let response = match client
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            // Handle DNS and connection errors gracefully
+            tracing::warn!(
+                "Failed to download image from URL ({}): {}. This is likely NOT a bug with rr-to-epub.",
+                url,
+                error
+            );
+            return Ok(None);
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            "Failed to download image from URL (HTTP {}): {}. This is likely NOT a bug with rr-to-epub.",
+            response.status(),
+            url
+        );
+        return Ok(None);
+    }
+    let bytes = response.bytes().await?;
+
+    if is_html(&bytes) {
+        // Skip HTML pages.
+        return Ok(None);
+    }
+    if is_gif(&bytes) || is_svg(&bytes) {
+        // Directly pass through the image.
+        let buffer = bytes.to_vec();
+        Cache::write_inline_image(book, &filename, &buffer)?;
+        return Ok(Some(buffer));
+    }
+
+    let image = if is_webp(&bytes) {
+        // Decode the image.
+        let Some(webp) = Decoder::new(&bytes).decode() else {
+            tracing::warn!(
+                "Failed to decode webp image. Please report this as a bug and include the following URL: {}",
+                url
+            );
+            return Ok(None); // Skip the image.
+        };
+        webp.to_image()
+    } else if is_jpeg(&bytes) || is_png(&bytes) {
+        // Decode the image.
+        Reader::new(Cursor::new(&bytes))
+            .with_guessed_format()?
+            .decode()?
+    } else {
+        bail!("Unsupported inline image format. Please report this as a bug and include the following URL: {}", url);
+    };
+
+    // Resize to max width of 600px.
+    let width = image.width();
+    let height = image.height();
+    let image = image.resize(
+        600,
+        600 * height / width,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Encode the image.
+    let mut buffer = Vec::new();
+    if is_png(&bytes) || is_webp(&bytes) {
+        // We write both PNG and WebP as PNG because WebP is not supported by some e-readers.
+        image.write_with_encoder(PngEncoder::new_with_quality(
+            Cursor::new(&mut buffer),
+            CompressionType::Fast,
+            FilterType::Adaptive,
+        ))?;
+    } else if is_jpeg(&bytes) {
+        image.write_with_encoder(JpegEncoder::new_with_quality(Cursor::new(&mut buffer), 80))?;
+    } else {
+        bail!("Unsupported inline image format. Please report this as a bug and include the following URL: {}", url);
+    };
+
+    // Save the image in the cache.
+    Cache::write_inline_image(book, &filename, &buffer)?;
+
+    Ok(Some(buffer))
+}
+
+async fn download_cover(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
+    let client = reqwest::Client::new();
+    let cover = client
+        .get(&book.cover_url)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = cover.bytes().await?;
+    file.write_all(&bytes)?;
     Ok(())
 }

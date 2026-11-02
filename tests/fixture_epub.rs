@@ -124,6 +124,7 @@ fn fixture_book_carries_the_raw_cases_later_tickets_clean() {
     assert!(story.contains("class=\"unused-spacer\""));
     assert!(story.contains("style=\"background-color"));
     assert!(story.contains(fixture::PROSE_LINK));
+    assert!(story.contains(fixture::STORY_IMAGE_URL));
 
     assert_eq!(book.chapters[1].title, fixture::ANNOUNCEMENT_TITLE);
 
@@ -565,6 +566,151 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         iso_8601.is_match(modified.trim()),
         "dcterms:modified {modified:?} is not a UTC ISO 8601 timestamp"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_fixture_epub_declares_only_referenced_inline_images() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let epub_path = temp.path().join("fixture.epub");
+
+    let book = fixture::synthetic_book();
+    let _cache_guard = fixture::seed_inline_image_cache(&book)?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+
+    let file = std::fs::File::open(&epub_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let entries = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+
+    let story_image_entry = "OEBPS/images/story-map.png";
+    assert!(
+        entries.iter().any(|entry| entry == story_image_entry),
+        "the retained story image is written to the EPUB"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry == "OEBPS/images/promo.png"),
+        "the promo image is not written even though its bytes are cached"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry == "OEBPS/images/cover.jpeg"),
+        "the cover is always kept"
+    );
+
+    let mut story_image = Vec::new();
+    archive
+        .by_name(story_image_entry)?
+        .read_to_end(&mut story_image)?;
+    assert_eq!(
+        story_image,
+        fixture::story_image_bytes(),
+        "the writer used the retained inline image bytes"
+    );
+
+    let opf_raw = archive_text(&mut archive, "OEBPS/content.opf")?;
+    assert_well_formed_xml("OEBPS/content.opf", &opf_raw)?;
+    let opf = parse_xml(&opf_raw)?;
+    let manifest_items = find_all(&opf, "item");
+
+    let story_item = manifest_items
+        .iter()
+        .find(|item| item.attr("href") == Some("images/story-map.png"))
+        .expect("the retained story image has a manifest item");
+    assert_eq!(
+        story_item.attr("id"),
+        Some("img-story-map-png"),
+        "the image manifest ID is stable"
+    );
+    assert_xml_safe_id(story_item.attr("id").expect("image item has an id"));
+    assert_eq!(
+        story_item.attr("media-type"),
+        Some("image/png"),
+        "the image manifest item declares the correct media type"
+    );
+
+    let cover_item = manifest_items
+        .iter()
+        .find(|item| item.attr("id") == Some("cover"))
+        .expect("the cover item is in the manifest");
+    assert_eq!(cover_item.attr("properties"), Some("cover-image"));
+
+    let mut chapter_markup = String::new();
+    for chapter in &book.chapters {
+        chapter_markup.push_str(&archive_text(
+            &mut archive,
+            &format!("OEBPS/text/{}.xhtml", chapter.id),
+        )?);
+    }
+    assert!(
+        archive_text(&mut archive, "OEBPS/text/101.xhtml")?.contains("../images/story-map.png"),
+        "the story chapter references the retained image"
+    );
+    assert!(
+        !chapter_markup.contains("promo"),
+        "no XHTML references the removed promo image"
+    );
+
+    let image_items = manifest_items
+        .iter()
+        .filter(|item| {
+            item.attr("href")
+                .is_some_and(|href| href.starts_with("images/"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        image_items
+            .iter()
+            .all(|item| item.attr("href") != Some("images/promo.png")),
+        "the removed promo image has no manifest item"
+    );
+
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.starts_with("OEBPS/images/"))
+    {
+        let filename = entry
+            .strip_prefix("OEBPS/images/")
+            .expect("image entry has the image prefix");
+        if filename == "cover.jpeg" {
+            continue;
+        }
+
+        let href = format!("images/{filename}");
+        assert!(
+            image_items
+                .iter()
+                .any(|item| item.attr("href") == Some(&href)),
+            "image {entry} has a manifest item"
+        );
+        assert!(
+            chapter_markup.contains(&format!("../images/{filename}")),
+            "image {entry} is referenced by an XHTML document"
+        );
+    }
+
+    for item in &image_items {
+        let href = item.attr("href").expect("image item has an href");
+        if href == "images/cover.jpeg" {
+            continue;
+        }
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry == &format!("OEBPS/{href}")),
+            "manifest item {href} has a matching image file"
+        );
+        let filename = href
+            .strip_prefix("images/")
+            .expect("image href has the image prefix");
+        assert!(
+            chapter_markup.contains(&format!("../images/{filename}")),
+            "manifest item {href} is referenced by an XHTML document"
+        );
+    }
 
     Ok(())
 }

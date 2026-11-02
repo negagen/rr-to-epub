@@ -3,7 +3,7 @@
 //! The fixture is deliberately raw: it keeps the source notice, spacer
 //! paragraph, unused classes, inline styles, and author-note promos that later
 //! tickets will clean. It never needs the network because the cover travels in
-//! `Book::cover` and the promo image is seeded into the inline-image cache.
+//! `Book::cover` and both inline images are seeded into the inline-image cache.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,8 @@ pub const PROSE_LINK: &str = "https://example.com/story-reference";
 pub const PROMO_LINK: &str = "https://example.com/promo";
 pub const PROMO_IMAGE_URL: &str = "https://example.com/assets/promo.png";
 pub const PROMO_IMAGE_FILENAME: &str = "promo.png";
+pub const STORY_IMAGE_URL: &str = "https://example.com/assets/story-map.png";
+pub const STORY_IMAGE_FILENAME: &str = "story-map.png";
 pub const COVER_URL: &str = "https://example.com/assets/cover.jpg";
 
 pub const NOTICE_TEXT: &str = "Copied from Royal Road. This chapter was reproduced without the author's consent. Please support the official release and the original work.";
@@ -63,6 +65,7 @@ fn story_chapter() -> Chapter {
                  <p class=\"unused-spacer\">\u{00a0}</p>\n\
                  <p style=\"background-color: #f5f5f5;\">The first paragraph has \
                  <a href=\"{PROSE_LINK}\">a prose link</a> that must survive cleanup.</p>\n\
+                 <p><img src=\"{STORY_IMAGE_URL}\" alt=\"Story map\" /></p>\n\
                  <p class=\"extra-spacing\">A second paragraph keeps the story readable and \
                  gives the fixture enough prose to score.</p>"
         )),
@@ -113,6 +116,10 @@ fn promo_image_bytes() -> Vec<u8> {
     encode_image(2, 2, [200, 40, 40], image::ImageOutputFormat::Png)
 }
 
+fn story_image_png() -> Vec<u8> {
+    encode_image(3, 2, [40, 200, 120], image::ImageOutputFormat::Png)
+}
+
 fn encode_image(
     width: u32,
     height: u32,
@@ -127,12 +134,20 @@ fn encode_image(
     bytes.into_inner()
 }
 
-/// Seed the inline-image cache so writing the promo image never touches the network.
+/// Seed the inline-image cache so writing the story image never touches the
+/// network. The promo image is seeded too, so a regression that downloads it
+/// would show up as a written file instead of a silently skipped fetch.
 pub fn seed_inline_image_cache(book: &Book) -> eyre::Result<CacheGuard> {
     let cache_dir = Cache::cache_path()?.join(book.id.to_string());
     let _ = std::fs::remove_dir_all(&cache_dir);
+    Cache::write_inline_image(book, STORY_IMAGE_FILENAME, &story_image_png())?;
     Cache::write_inline_image(book, PROMO_IMAGE_FILENAME, &promo_image_bytes())?;
     Ok(CacheGuard { cache_dir })
+}
+
+/// The bytes seeded for the story image, so tests can compare the archive.
+pub fn story_image_bytes() -> Vec<u8> {
+    story_image_png()
 }
 
 /// Write a source cache (`book.json`) that matches the synthetic fixture.
