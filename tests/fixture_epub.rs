@@ -221,6 +221,16 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
     let file = std::fs::File::open(&epub_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
+    {
+        let mimetype = archive.by_index(0)?;
+        assert_eq!(mimetype.name(), "mimetype");
+        assert_eq!(
+            mimetype.compression(),
+            zip::CompressionMethod::Stored,
+            "the mimetype entry must be first and uncompressed for OCF readers"
+        );
+    }
+
     let opf_raw = archive_text(&mut archive, "OEBPS/content.opf")?;
     assert_well_formed_xml("OEBPS/content.opf", &opf_raw)?;
     let opf = parse_xml(&opf_raw)?;

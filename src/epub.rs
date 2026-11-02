@@ -384,8 +384,11 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
     let file = std::fs::File::create(&epub_path)?;
     let mut epub_file = zip::ZipWriter::new(file);
 
-    // Write the mimetype.
-    epub_file.start_file("mimetype", zip::write::FileOptions::default())?;
+    // Write the mimetype first and uncompressed, as OCF readers require.
+    epub_file.start_file(
+        "mimetype",
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )?;
     epub_file.write_all(b"application/epub+zip")?;
 
     // Write the META-INF folder.
