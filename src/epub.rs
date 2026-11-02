@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 use webp::Decoder;
@@ -272,6 +273,94 @@ pub struct Chapter {
     pub authors_note_end: Option<String>,
 }
 
+/// A document in reading order, used to keep the nav document and the NCX in
+/// sync with the package spine.
+struct SpineDocument {
+    manifest_id: String,
+    ncx_id: String,
+    title: String,
+    href: String,
+    nav_href: String,
+    linear: bool,
+}
+
+fn spine_documents(book: &Book) -> Vec<SpineDocument> {
+    let mut documents = Vec::with_capacity(book.chapters.len() + 1);
+    documents.push(SpineDocument {
+        manifest_id: "title".to_string(),
+        ncx_id: "nav-title".to_string(),
+        title: "Cover".to_string(),
+        href: "text/title.xhtml".to_string(),
+        nav_href: "title.xhtml".to_string(),
+        linear: true,
+    });
+
+    for chapter in &book.chapters {
+        documents.push(SpineDocument {
+            manifest_id: format!("ch-{}", chapter.id),
+            ncx_id: format!("nav-{}", chapter.id),
+            title: chapter.title.trim().to_string(),
+            href: format!("text/{}.xhtml", chapter.id),
+            nav_href: format!("{}.xhtml", chapter.id),
+            linear: !is_non_story_document(&chapter.title),
+        });
+    }
+
+    documents
+}
+
+/// Match the QA facts heuristic: announcement, update, schedule, and notice
+/// documents are non-linear unless the title also names a chapter.
+fn is_non_story_document(title: &str) -> bool {
+    let title = title.to_lowercase();
+    if title.contains("chapter") {
+        return false;
+    }
+    ["announcement", "update", "schedule", "notice"]
+        .iter()
+        .any(|keyword| title.contains(keyword))
+}
+
+fn plain_text(html: &str) -> String {
+    let fragment = Html::parse_fragment(html);
+    let text = fragment.root_element().text().collect::<Vec<_>>().join(" ");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn utc_modified() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Convert days since the Unix epoch to a proleptic Gregorian date.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()> {
     // Create a temp dir.
     let temp_folder = tempfile::tempdir()?;
@@ -356,6 +445,10 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
     // Write the title page.
     epub_file.start_file("OEBPS/text/title.xhtml", zip::write::FileOptions::default())?;
     title_html(book, &mut epub_file)?;
+
+    // Write the EPUB 3 navigation document.
+    epub_file.start_file("OEBPS/text/nav.xhtml", zip::write::FileOptions::default())?;
+    nav_html(book, &mut epub_file)?;
 
     // Write the stylesheet.
     epub_file.start_file(
@@ -547,6 +640,11 @@ fn container_xml(_: &Book, file: &mut impl Write) -> eyre::Result<()> {
 }
 
 fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
+    let documents = spine_documents(book);
+    let title = book.title.trim();
+    let description = plain_text(&book.description);
+    let modified = utc_modified();
+
     let mut xml = EmitterConfig::new()
         .perform_indent(true)
         .create_writer(file);
@@ -560,15 +658,16 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
                 .into(),
             XmlEvent::start_element("metadata")
                 .ns("dc", "http://purl.org/dc/elements/1.1/")
+                .ns("dcterms", "http://purl.org/dc/terms/")
                 .into(),
             XmlEvent::start_element("dc:title").into(),
-            XmlEvent::characters(&book.title),
+            XmlEvent::characters(title),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("dc:creator").into(),
             XmlEvent::characters(&book.author),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("dc:description").into(),
-            XmlEvent::characters(&book.description),
+            XmlEvent::characters(&description),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("dc:date").into(),
             XmlEvent::characters(&book.date_published),
@@ -580,6 +679,11 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             XmlEvent::start_element("dc:language").into(),
             XmlEvent::characters("en"),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("meta")
+                .attr("property", "dcterms:modified")
+                .into(),
+            XmlEvent::characters(&modified),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("meta")
                 .attr("name", "cover")
@@ -599,18 +703,12 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             // Write the manifest.
             XmlEvent::start_element("manifest").into(),
-            // Write the title page.
-            XmlEvent::start_element("item")
-                .attr("id", "title")
-                .attr("href", "text/title.xhtml")
-                .attr("media-type", "application/xhtml+xml")
-                .into(),
-            XmlEvent::end_element().into(),
             // Write the cover.
             XmlEvent::start_element("item")
                 .attr("id", "cover")
                 .attr("href", "images/cover.jpeg")
                 .attr("media-type", "image/jpeg")
+                .attr("properties", "cover-image")
                 .into(),
             XmlEvent::end_element().into(),
             // Write the stylesheet.
@@ -627,51 +725,64 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
                 .attr("media-type", "application/x-dtbncx+xml")
                 .into(),
             XmlEvent::end_element().into(),
+            // Write the EPUB 3 navigation document.
+            XmlEvent::start_element("item")
+                .attr("id", "nav")
+                .attr("href", "text/nav.xhtml")
+                .attr("media-type", "application/xhtml+xml")
+                .attr("properties", "nav")
+                .into(),
+            XmlEvent::end_element().into(),
         ],
     )?;
 
-    // Write each chapter.
-    for chapter in book.chapters.iter() {
+    // Write the title page and each chapter in reading order.
+    for document in &documents {
         write_elements(
             &mut xml,
             vec![
                 XmlEvent::start_element("item")
-                    .attr("id", &format!("{}", chapter.id))
-                    .attr("href", &format!("text/{}.xhtml", chapter.id))
+                    .attr("id", &document.manifest_id)
+                    .attr("href", &document.href)
                     .attr("media-type", "application/xhtml+xml")
                     .into(),
                 XmlEvent::end_element().into(),
             ],
         )?;
     }
+
     write_elements(
         &mut xml,
         vec![
             XmlEvent::end_element().into(),
             // Start the spine.
             XmlEvent::start_element("spine").attr("toc", "ncx").into(),
-            // Write the title page entry.
-            XmlEvent::start_element("itemref")
-                .attr("idref", "title")
-                .into(),
-            XmlEvent::end_element().into(),
         ],
     )?;
-    // For each chapter, write a link.
-    for chapter in book.chapters.iter() {
+
+    for document in &documents {
+        let itemref = XmlEvent::start_element("itemref").attr("idref", &document.manifest_id);
+        let itemref = if document.linear {
+            itemref
+        } else {
+            itemref.attr("linear", "no")
+        };
         write_elements(
             &mut xml,
-            vec![
-                XmlEvent::start_element("itemref")
-                    .attr("idref", &format!("{}", chapter.id))
-                    .into(),
-                XmlEvent::end_element().into(),
-            ],
+            vec![itemref.into(), XmlEvent::end_element().into()],
         )?;
     }
+
+    // The navigation document itself must not take part in the linear reading
+    // order.
     write_elements(
         &mut xml,
         vec![
+            XmlEvent::start_element("itemref")
+                .attr("idref", "nav")
+                .attr("linear", "no")
+                .into(),
+            XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
         ],
@@ -681,6 +792,7 @@ fn content_opf(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
 }
 
 fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
+    let documents = spine_documents(book);
     let mut xml = EmitterConfig::new()
         .perform_indent(true)
         .create_writer(file);
@@ -716,43 +828,28 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             XmlEvent::start_element("docTitle").into(),
             XmlEvent::start_element("text").into(),
-            XmlEvent::characters(&book.title),
+            XmlEvent::characters(book.title.trim()),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
             XmlEvent::start_element("navMap").into(),
-            XmlEvent::start_element("navPoint")
-                .attr("id", "cover")
-                .attr("playOrder", "1")
-                .into(),
-            XmlEvent::start_element("navLabel").into(),
-            XmlEvent::start_element("text").into(),
-            XmlEvent::characters("Cover"),
-            XmlEvent::end_element().into(),
-            XmlEvent::end_element().into(),
-            XmlEvent::start_element("content")
-                .attr("src", "text/title.xhtml")
-                .into(),
-            XmlEvent::end_element().into(),
-            XmlEvent::end_element().into(),
         ],
     )?;
 
-    // For each chapter, write a link.
-    for (index, chapter) in book.chapters.iter().enumerate() {
+    for (index, document) in documents.iter().enumerate() {
         write_elements(
             &mut xml,
             vec![
                 XmlEvent::start_element("navPoint")
-                    .attr("id", &format!("{}", chapter.id))
-                    .attr("playOrder", &format!("{}", index + 2))
+                    .attr("id", &document.ncx_id)
+                    .attr("playOrder", &format!("{}", index + 1))
                     .into(),
                 XmlEvent::start_element("navLabel").into(),
                 XmlEvent::start_element("text").into(),
-                XmlEvent::characters(&chapter.title),
+                XmlEvent::characters(&document.title),
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::start_element("content")
-                    .attr("src", &format!("text/{}.xhtml", chapter.id))
+                    .attr("src", &document.href)
                     .into(),
                 XmlEvent::end_element().into(),
                 XmlEvent::end_element().into(),
@@ -764,6 +861,71 @@ fn toc_ncx(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
     write_elements(
         &mut xml,
         vec![
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn nav_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
+    let documents = spine_documents(book);
+    let mut xml = EmitterConfig::new()
+        .perform_indent(true)
+        .create_writer(file);
+
+    write_elements(
+        &mut xml,
+        vec![
+            XmlEvent::start_element("html")
+                .ns("", "http://www.w3.org/1999/xhtml")
+                .ns("epub", "http://www.idpf.org/2007/ops")
+                .attr("xml:lang", "en")
+                .into(),
+            XmlEvent::start_element("head").into(),
+            XmlEvent::start_element("title").into(),
+            XmlEvent::characters("Contents"),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("link")
+                .attr("rel", "stylesheet")
+                .attr("type", "text/css")
+                .attr("href", "../styles/stylesheet.css")
+                .into(),
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("body").into(),
+            XmlEvent::start_element("nav")
+                .attr("epub:type", "toc")
+                .attr("id", "toc")
+                .into(),
+            XmlEvent::start_element("h1").into(),
+            XmlEvent::characters("Contents"),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("ol").into(),
+        ],
+    )?;
+
+    for document in &documents {
+        write_elements(
+            &mut xml,
+            vec![
+                XmlEvent::start_element("li").into(),
+                XmlEvent::start_element("a")
+                    .attr("href", &document.nav_href)
+                    .into(),
+                XmlEvent::characters(&document.title),
+                XmlEvent::end_element().into(),
+                XmlEvent::end_element().into(),
+            ],
+        )?;
+    }
+
+    write_elements(
+        &mut xml,
+        vec![
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
         ],
