@@ -42,6 +42,12 @@ pub fn expected_chapter_titles() -> [&'static str; 3] {
     [CHAPTER_ONE_TITLE, ANNOUNCEMENT_TITLE, CHAPTER_TWO_TITLE]
 }
 
+pub fn synthetic_book_with_id(id: u32) -> Book {
+    let mut book = synthetic_book();
+    book.id = id;
+    book
+}
+
 pub fn synthetic_book() -> Book {
     let mut book = Book::default();
     book.id = BOOK_ID;

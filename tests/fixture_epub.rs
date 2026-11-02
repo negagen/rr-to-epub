@@ -145,7 +145,7 @@ async fn generated_fixture_epub_opens_with_expected_chapters_and_titles() -> eyr
     let epub_path = temp.path().join("fixture.epub");
     let source_cache_path = temp.path().join("book.json");
 
-    let book = fixture::synthetic_book();
+    let book = fixture::synthetic_book_with_id(2_000_000_101);
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
     fixture::write_source_cache(&source_cache_path, &book)?;
 
@@ -191,7 +191,7 @@ async fn generated_fixture_epub_opens_with_expected_chapters_and_titles() -> eyr
 
     let cached: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&source_cache_path)?)?;
-    assert_eq!(cached["id"], fixture::BOOK_ID);
+    assert_eq!(cached["id"], book.id);
     assert_eq!(
         cached["chapters"]
             .as_array()
@@ -208,7 +208,7 @@ async fn generated_fixture_epub_cleans_chapter_content_and_notes() -> eyre::Resu
     let temp = tempfile::tempdir()?;
     let epub_path = temp.path().join("fixture.epub");
 
-    let book = fixture::synthetic_book();
+    let book = fixture::synthetic_book_with_id(2_000_000_102);
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
     write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
 
@@ -356,7 +356,7 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
     let temp = tempfile::tempdir()?;
     let epub_path = temp.path().join("fixture.epub");
 
-    let mut book = fixture::synthetic_book();
+    let mut book = fixture::synthetic_book_with_id(2_000_000_103);
     book.title = format!("  {}  ", fixture::BOOK_TITLE);
     book.description = DESCRIPTION_HTML.to_string();
 
@@ -572,7 +572,7 @@ async fn generated_fixture_epub_declares_only_referenced_inline_images() -> eyre
     let temp = tempfile::tempdir()?;
     let epub_path = temp.path().join("fixture.epub");
 
-    let book = fixture::synthetic_book();
+    let book = fixture::synthetic_book_with_id(2_000_000_104);
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
     write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
 
@@ -717,7 +717,7 @@ async fn generated_fixture_epub_uses_the_cover_media_type() -> eyre::Result<()> 
     let temp = tempfile::tempdir()?;
     let epub_path = temp.path().join("fixture.epub");
 
-    let mut book = fixture::synthetic_book();
+    let mut book = fixture::synthetic_book_with_id(2_000_000_105);
     book.cover = Some(fixture::story_image_bytes());
 
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
