@@ -33,6 +33,18 @@ rr-to-epub update -d <directory>
 
 Full help can be found by running `rr-to-epub --help`.
 
+## Attribution notice
+
+Every generated EPUB includes a one-page notice near the front. By default it says the copy is
+unauthorized and links to the Royal Road fiction. If the author has allowed EPUB copies, pass
+`--authorized-copy` and the notice will say the author authorized them:
+
+```sh
+rr-to-epub download --book-id <book-id> --authorized-copy <title>.epub
+```
+
+`--authorized-copy` also works with `update`.
+
 ## Testing
 
 The EPUB writer has an integration test that builds a synthetic book fixture and
