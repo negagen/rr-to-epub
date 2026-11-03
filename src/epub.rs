@@ -286,13 +286,21 @@ struct SpineDocument {
 }
 
 fn spine_documents(book: &Book) -> Vec<SpineDocument> {
-    let mut documents = Vec::with_capacity(book.chapters.len() + 1);
+    let mut documents = Vec::with_capacity(book.chapters.len() + 2);
     documents.push(SpineDocument {
         manifest_id: "title".to_string(),
         ncx_id: "nav-title".to_string(),
         title: "Cover".to_string(),
         href: "text/title.xhtml".to_string(),
         nav_href: "title.xhtml".to_string(),
+        linear: true,
+    });
+    documents.push(SpineDocument {
+        manifest_id: "notice".to_string(),
+        ncx_id: "nav-notice".to_string(),
+        title: "Notice".to_string(),
+        href: "text/notice.xhtml".to_string(),
+        nav_href: "notice.xhtml".to_string(),
         linear: true,
     });
 
@@ -703,7 +711,11 @@ fn serialize_fragment(document: &Html) -> String {
     output
 }
 
-pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()> {
+pub async fn write_epub(
+    book: &Book,
+    outfile: Option<String>,
+    authorized_copy: bool,
+) -> eyre::Result<()> {
     // Create a temp dir.
     let temp_folder = tempfile::tempdir()?;
 
@@ -841,6 +853,13 @@ pub async fn write_epub(book: &Book, outfile: Option<String>) -> eyre::Result<()
     epub_file.start_file("OEBPS/text/title.xhtml", zip::write::FileOptions::default())?;
     title_html(book, &mut epub_file)?;
 
+    // Write the one-page attribution notice.
+    epub_file.start_file(
+        "OEBPS/text/notice.xhtml",
+        zip::write::FileOptions::default(),
+    )?;
+    notice_html(book, authorized_copy, &mut epub_file)?;
+
     // Write the EPUB 3 navigation document.
     epub_file.start_file("OEBPS/text/nav.xhtml", zip::write::FileOptions::default())?;
     nav_html(book, &mut epub_file)?;
@@ -907,6 +926,65 @@ fn title_html(book: &Book, file: &mut impl Write) -> eyre::Result<()> {
             XmlEvent::end_element().into(),
             XmlEvent::start_element("h2").into(),
             XmlEvent::characters(&book.author),
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn notice_html(book: &Book, authorized_copy: bool, file: &mut impl Write) -> eyre::Result<()> {
+    let mut xml = EmitterConfig::new()
+        .perform_indent(true)
+        .create_writer(file);
+    let fiction_url = format!("https://www.royalroad.com/fiction/{}", book.id);
+    let status = if authorized_copy {
+        "The author has authorized EPUB copies."
+    } else {
+        "This copy is unauthorized."
+    };
+
+    write_elements(
+        &mut xml,
+        vec![
+            XmlEvent::start_element("html")
+                .ns("", "http://www.w3.org/1999/xhtml")
+                .attr("xml:lang", "en")
+                .into(),
+            XmlEvent::start_element("head").into(),
+            XmlEvent::start_element("title").into(),
+            XmlEvent::characters("Notice"),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("link")
+                .attr("rel", "stylesheet")
+                .attr("type", "text/css")
+                .attr("href", "../styles/stylesheet.css")
+                .into(),
+            XmlEvent::end_element().into(),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("body").into(),
+            XmlEvent::start_element("h1").into(),
+            XmlEvent::characters("Notice"),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("p").into(),
+            XmlEvent::characters(&format!(
+                "This is a downloaded copy of the Royal Road publication \"{}\" by {}.",
+                book.title.trim(),
+                book.author
+            )),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("p").into(),
+            XmlEvent::characters("Please support the author on Royal Road: "),
+            XmlEvent::start_element("a")
+                .attr("href", &fiction_url)
+                .into(),
+            XmlEvent::characters(&fiction_url),
+            XmlEvent::end_element().into(),
+            XmlEvent::characters("."),
+            XmlEvent::end_element().into(),
+            XmlEvent::start_element("p").into(),
+            XmlEvent::characters(status),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),
             XmlEvent::end_element().into(),

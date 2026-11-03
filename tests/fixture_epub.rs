@@ -149,7 +149,7 @@ async fn generated_fixture_epub_opens_with_expected_chapters_and_titles() -> eyr
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
     fixture::write_source_cache(&source_cache_path, &book)?;
 
-    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false).await?;
     assert!(epub_path.exists(), "writer produced an EPUB file");
 
     let file = std::fs::File::open(&epub_path)?;
@@ -210,7 +210,7 @@ async fn generated_fixture_epub_cleans_chapter_content_and_notes() -> eyre::Resu
 
     let book = fixture::synthetic_book_with_id(2_000_000_102);
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
-    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false).await?;
 
     let file = std::fs::File::open(&epub_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -361,7 +361,7 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
     book.description = DESCRIPTION_HTML.to_string();
 
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
-    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false).await?;
 
     let file = std::fs::File::open(&epub_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -399,6 +399,16 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
     assert_eq!(nav_item.attr("id"), Some("nav"));
     assert_eq!(nav_item.attr("href"), Some("text/nav.xhtml"));
     assert_eq!(nav_item.attr("media-type"), Some("application/xhtml+xml"));
+
+    let notice_item = manifest_items
+        .iter()
+        .find(|item| item.attr("id") == Some("notice"))
+        .expect("notice item is in the manifest");
+    assert_eq!(notice_item.attr("href"), Some("text/notice.xhtml"));
+    assert_eq!(
+        notice_item.attr("media-type"),
+        Some("application/xhtml+xml")
+    );
 
     let ncx_item = manifest_items
         .iter()
@@ -445,6 +455,12 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         "the nav document is non-linear"
     );
 
+    let notice_ref = itemrefs
+        .iter()
+        .find(|itemref| itemref.attr("idref") == Some("notice"))
+        .expect("the notice is in the spine");
+    assert_ne!(notice_ref.attr("linear"), Some("no"));
+
     for itemref in &itemrefs {
         assert_xml_safe_id(itemref.attr("idref").expect("every itemref has an idref"));
     }
@@ -480,7 +496,7 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         .collect::<Vec<_>>();
     assert_eq!(
         nav_point_ids,
-        vec!["nav-title", "nav-101", "nav-102", "nav-103"]
+        vec!["nav-title", "nav-notice", "nav-101", "nav-102", "nav-103"]
     );
     for id in &nav_point_ids {
         assert_xml_safe_id(id);
@@ -494,6 +510,7 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         ncx_sources,
         vec![
             "text/title.xhtml",
+            "text/notice.xhtml",
             "text/101.xhtml",
             "text/102.xhtml",
             "text/103.xhtml"
@@ -516,7 +533,13 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         .collect::<Vec<_>>();
     assert_eq!(
         hrefs,
-        vec!["title.xhtml", "101.xhtml", "102.xhtml", "103.xhtml"],
+        vec![
+            "title.xhtml",
+            "notice.xhtml",
+            "101.xhtml",
+            "102.xhtml",
+            "103.xhtml"
+        ],
         "the nav document follows the spine order"
     );
     let labels = links
@@ -527,6 +550,7 @@ async fn generated_fixture_epub_has_conformant_package_and_navigation() -> eyre:
         labels,
         vec![
             "Cover",
+            "Notice",
             fixture::CHAPTER_ONE_TITLE,
             fixture::ANNOUNCEMENT_TITLE,
             fixture::CHAPTER_TWO_TITLE
@@ -574,7 +598,7 @@ async fn generated_fixture_epub_declares_only_referenced_inline_images() -> eyre
 
     let book = fixture::synthetic_book_with_id(2_000_000_104);
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
-    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false).await?;
 
     let file = std::fs::File::open(&epub_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -721,7 +745,7 @@ async fn generated_fixture_epub_uses_the_cover_media_type() -> eyre::Result<()> 
     book.cover = Some(fixture::story_image_bytes());
 
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
-    write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false).await?;
 
     let file = std::fs::File::open(&epub_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -731,6 +755,44 @@ async fn generated_fixture_epub_uses_the_cover_media_type() -> eyre::Result<()> 
     let opf = archive_text(&mut archive, "OEBPS/content.opf")?;
     assert!(opf.contains(r#"href="images/cover.png""#));
     assert!(opf.contains(r#"media-type="image/png""#));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_fixture_epub_includes_the_attribution_notice() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let unauthorized_path = temp.path().join("unauthorized.epub");
+    let authorized_path = temp.path().join("authorized.epub");
+
+    let book = fixture::synthetic_book_with_id(2_000_000_106);
+    let _cache_guard = fixture::seed_inline_image_cache(&book)?;
+
+    write_epub(
+        &book,
+        Some(unauthorized_path.to_string_lossy().into_owned()),
+        false,
+    )
+    .await?;
+    write_epub(
+        &book,
+        Some(authorized_path.to_string_lossy().into_owned()),
+        true,
+    )
+    .await?;
+
+    let mut unauthorized_archive = zip::ZipArchive::new(std::fs::File::open(&unauthorized_path)?)?;
+    let unauthorized = archive_text(&mut unauthorized_archive, "OEBPS/text/notice.xhtml")?;
+    assert!(unauthorized.contains(fixture::BOOK_TITLE));
+    assert!(unauthorized.contains(fixture::BOOK_AUTHOR));
+    assert!(unauthorized.contains(&format!("https://www.royalroad.com/fiction/{}", book.id)));
+    assert!(unauthorized.contains("This copy is unauthorized."));
+    assert!(!unauthorized.contains("The author has authorized EPUB copies."));
+
+    let mut authorized_archive = zip::ZipArchive::new(std::fs::File::open(&authorized_path)?)?;
+    let authorized = archive_text(&mut authorized_archive, "OEBPS/text/notice.xhtml")?;
+    assert!(authorized.contains("The author has authorized EPUB copies."));
+    assert!(!authorized.contains("This copy is unauthorized."));
 
     Ok(())
 }

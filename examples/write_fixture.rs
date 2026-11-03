@@ -25,7 +25,8 @@ async fn main() -> eyre::Result<()> {
     let source_cache_path = out_dir.join("book.json");
 
     let _cache_guard = fixture::seed_inline_image_cache(&book)?;
-    rr_to_epub::epub::write_epub(&book, Some(epub_path.to_string_lossy().into_owned())).await?;
+    rr_to_epub::epub::write_epub(&book, Some(epub_path.to_string_lossy().into_owned()), false)
+        .await?;
     fixture::write_source_cache(&source_cache_path, &book)?;
 
     println!("Wrote {}", epub_path.display());

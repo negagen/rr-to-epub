@@ -29,6 +29,10 @@ pub struct GlobalArgs {
     #[arg(long = "ignore-cache", global = true)]
     /// Ignore the cache and redownload all chapters even if the book wasn't modified.
     pub ignore_cache: bool,
+
+    #[arg(long = "authorized-copy", global = true)]
+    /// The author has authorized EPUB copies; the attribution notice will say so.
+    pub authorized_copy: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -95,7 +99,7 @@ async fn download(global_args: GlobalArgs, args: DownloadArgs) -> eyre::Result<(
 
     let api = RoyalRoadApi::new();
     let book = api.get_book(id, global_args.ignore_cache).await?;
-    write_epub(&book, args.output_file).await?;
+    write_epub(&book, args.output_file, global_args.authorized_copy).await?;
     Ok(())
 }
 async fn update(global_args: GlobalArgs, args: UpdateArgs) -> eyre::Result<()> {
@@ -123,7 +127,7 @@ async fn update(global_args: GlobalArgs, args: UpdateArgs) -> eyre::Result<()> {
         if let Some(id) = id {
             tracing::info!("Found book file \"{}\", updating.", file_name);
             let book = api.get_book(id, global_args.ignore_cache).await?;
-            write_epub(&book, Some(file_name)).await?;
+            write_epub(&book, Some(file_name), global_args.authorized_copy).await?;
         } else {
             tracing::error!("Book file at \"{}\" is unmanaged, aborting.", file_name);
         }
@@ -142,7 +146,7 @@ async fn update(global_args: GlobalArgs, args: UpdateArgs) -> eyre::Result<()> {
             if let Some(id) = id {
                 tracing::info!("Found book file \"{}\", updating.", file_name);
                 let book = api.get_book(id, global_args.ignore_cache).await?;
-                write_epub(&book, Some(file_name)).await?;
+                write_epub(&book, Some(file_name), global_args.authorized_copy).await?;
             } else {
                 tracing::warn!("Found unmanaged book file \"{}\", skipping.", file_name,);
             }
